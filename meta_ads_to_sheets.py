@@ -341,30 +341,38 @@ def main():
     existing = read_existing_rows(ws)
     print(f"📖 Filas existentes en Sheet: {len(existing)}")
  
-    # Filtrar filas congeladas: las que pertenezcan a meses congelados se conservan
-    frozen_keys = set()
-    for (y, m) in frozen_months:
-        s, e = month_start_end(y, m)
-        frozen_keys.add((s, e))
+    # Identificar qué meses congelados YA existen en la Sheet
+    existing_keys = set()
+    for row in existing:
+        if len(row) >= 2:
+            existing_keys.add((row[0], row[1]))
  
     preserved_rows = []
-    for row in existing:
-        if len(row) < 2:
-            continue
-        key = (row[0], row[1])  # (Inicio, Fin)
-        if key in frozen_keys:
-            preserved_rows.append(row)
+    months_to_backfill = []  # meses congelados que NO están en la Sheet → hay que pedirlos
+    for (y, m) in frozen_months:
+        s, e = month_start_end(y, m)
+        if (s, e) in existing_keys:
+            # Este mes congelado YA está en la Sheet → conservar las filas existentes
+            for row in existing:
+                if len(row) >= 2 and (row[0], row[1]) == (s, e):
+                    preserved_rows.append(row)
+        else:
+            # Este mes congelado NO está en la Sheet → hay que pedirlo a Meta (backfill)
+            months_to_backfill.append((y, m))
  
     print(f"❄️  Filas congeladas conservadas: {len(preserved_rows)}")
+    if months_to_backfill:
+        print(f"🔄 Meses congelados a rellenar (backfill inicial): {months_to_backfill}")
  
     # 3. Descargar metadatos de adsets
     print(f"📥 Descargando lista de conjuntos de anuncios...")
     adsets = fetch_adsets(account_id, token)
     print(f"   → {len(adsets)} adsets encontrados.")
  
-    # 4. Descargar insights de los meses activos y construir filas nuevas
+    # 4. Descargar insights de los meses activos + backfill, construir filas nuevas
+    months_to_fetch = months_to_backfill + active_months
     new_rows = []
-    for (y, m) in active_months:
+    for (y, m) in months_to_fetch:
         print(f"📥 Descargando insights de {y}-{m:02d}...")
         insights, since, until = fetch_insights_for_month(account_id, token, y, m)
         print(f"   → {len(insights)} insights")
