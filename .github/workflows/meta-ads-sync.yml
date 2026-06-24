@@ -1,38 +1,34 @@
 name: Sync Meta Ads to Google Sheets
- 
-# Corre 3 veces al día en hora Lima (UTC-5):
-#  - 13:00 UTC  =  8:00 AM Lima
-#  - 19:00 UTC  =  2:00 PM Lima
-#  - 01:00 UTC  =  8:00 PM Lima del día anterior
+
+# Corre 1 vez al día a las 8:00 AM hora Lima (UTC-5):
+#  - 13:00 UTC = 8:00 AM Lima
 # También puedes correrlo manualmente desde la pestaña Actions de GitHub.
- 
+
 on:
   schedule:
     - cron: "0 13 * * *"
-    - cron: "0 19 * * *"
-    - cron: "0 1 * * *"
   workflow_dispatch:
- 
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
- 
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
- 
+
       - name: Install dependencies
         run: pip install -r requirements.txt
- 
+
       - name: Run Meta Ads → Sheets
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DAYS_BACK: "30"
+          GRACE_DAYS: "180"
         run: python meta_ads_to_sheets.py
