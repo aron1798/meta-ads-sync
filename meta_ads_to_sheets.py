@@ -214,11 +214,18 @@ def fetch_insights_for_month(account_id, token, year, month):
         "impressions", "reach", "spend",
         "actions", "cost_per_action_type",
         "objective",
+        # 'results' trae el RESULTADO PRINCIPAL ya calculado por Meta según el
+        # objetivo del anuncio (el mismo número que aparece en la exportación).
+        "results",
     ])
     params = {
         "level": "adset",
         "fields": fields,
         "time_range": json.dumps({"since": since, "until": until}),
+        # Usa la MISMA ventana de atribución que el usuario ve en Ads Manager
+        # (por defecto de la cuenta). Sin esto, Meta devuelve una ventana distinta
+        # y los resultados salen inflados.
+        "use_unified_attribution_setting": "true",
         "limit": 200,
         "access_token": token,
     }
@@ -240,28 +247,69 @@ def get_action_value(actions, action_type):
     return None
 
 
+def parse_meta_results(insight):
+    """
+    Lee el campo 'results' que Meta ya calculó (el resultado principal según el
+    objetivo del anuncio, con la ventana de atribución estándar de la cuenta).
+    Devuelve (valor, indicador_texto) o (None, None) si no viene.
+
+    Estructura típica del campo:
+      "results": [
+        {"indicator": "actions:onsite_conversion.messaging_conversation_started_7d",
+         "values": [{"value": "211"}]}
+      ]
+    """
+    results = insight.get("results")
+    if not results:
+        return None, None
+    try:
+        first = results[0]
+        indicator_raw = first.get("indicator", "")
+        values = first.get("values", [])
+        if not values:
+            return None, None
+        value = float(values[0].get("value", 0))
+        # Traducir el indicador a etiqueta legible si lo conocemos
+        clean = indicator_raw.replace("actions:", "")
+        label = RESULT_LABELS.get(clean, indicator_raw)
+        return value, label
+    except (IndexError, KeyError, ValueError, TypeError):
+        return None, None
+
+
 def pick_result(insight):
     """
-    Elige el RESULTADO PRINCIPAL igual que Meta, según el objetivo del anuncio.
+    Elige el RESULTADO PRINCIPAL igual que Meta.
+
+    Estrategia:
+    1) Usar el campo 'results' que Meta ya calculó (idéntico a la exportación).
+    2) Si no viene, caer al método por objetivo.
+    3) Si tampoco, prioridad general, y por último alcance.
+
     Devuelve (valor, action_type, etiqueta).
     """
+    # 1) Preferir el resultado ya calculado por Meta
+    meta_val, meta_label = parse_meta_results(insight)
+    if meta_val is not None:
+        return meta_val, "_meta_results", meta_label
+
     actions = insight.get("actions", []) or []
     objective = (insight.get("objective") or "").upper()
 
-    # 1) Intentar según el objetivo del anuncio
+    # 2) Según el objetivo del anuncio
     candidates = OBJECTIVE_RESULT.get(objective, [])
     for action_type in candidates:
         v = get_action_value(actions, action_type)
         if v is not None:
             return v, action_type, RESULT_LABELS.get(action_type, action_type)
 
-    # 2) Respaldo: recorrer prioridad general
+    # 3) Respaldo: recorrer prioridad general
     for action_type in FALLBACK_PRIORITY:
         v = get_action_value(actions, action_type)
         if v is not None:
             return v, action_type, RESULT_LABELS.get(action_type, action_type)
 
-    # 3) Último respaldo: alcance
+    # 4) Último respaldo: alcance
     reach = insight.get("reach")
     if reach:
         return float(reach), "reach", RESULT_LABELS["reach"]
@@ -455,12 +503,17 @@ def main():
     if months_to_backfill:
         print(f"🔄 Meses a rellenar (backfill): {months_to_backfill}")
 
-    # 3. Descargar metadatos de adsets
+    # 3. Descargar metadatos de adsets (para enriquecer con presupuesto, puja, etc.)
     print("📥 Descargando lista de conjuntos de anuncios...")
     adsets = fetch_adsets(account_id, token)
     print(f"   → {len(adsets)} adsets encontrados.")
+    # Diccionario por ID para buscar rápido los metadatos de cada adset
+    adsets_by_id = {a["id"]: a for a in adsets}
 
     # 4. Descargar insights de los meses activos + backfill, construir filas nuevas
+    #    IMPORTANTE: recorremos los INSIGHTS (que tienen los datos reales del mes),
+    #    no la lista de adsets. Así no se pierde ningún conjunto que haya tenido
+    #    actividad, aunque ya no esté activo o tenga el mismo nombre que otro.
     months_to_fetch = months_to_backfill + active_months
     new_rows = []
     for (y, m) in months_to_fetch:
@@ -468,12 +521,13 @@ def main():
         insights, since, until = fetch_insights_for_month(account_id, token, y, m)
         print(f"   → {len(insights)} insights")
 
-        insights_by_id = {i["adset_id"]: i for i in insights}
-
-        for ads in adsets:
-            ins = insights_by_id.get(ads["id"])
-            if ins is None:
-                continue
+        for ins in insights:
+            adset_id = ins.get("adset_id")
+            # Buscar metadatos del adset; si no está en la lista, usar lo que traiga el insight
+            ads = adsets_by_id.get(adset_id, {
+                "id": adset_id,
+                "name": ins.get("adset_name", ""),
+            })
             row = build_row(ads, ins, since, until, now_iso)
             new_rows.append(row)
 
