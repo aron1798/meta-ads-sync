@@ -412,6 +412,25 @@ def build_row(adset, insight, since, until, now_iso):
     ]
 
 
+def is_empty_row(row):
+    """
+    Devuelve True si la fila NO tiene actividad: es decir, si el gasto es 0/vacío
+    Y el resultado es 0/vacío. Estas filas no se guardan en la Sheet.
+    Posiciones en la fila: Resultados = índice 5, Importe gastado = índice 10.
+    """
+    def es_cero_o_vacio(valor):
+        if valor is None or valor == "":
+            return True
+        try:
+            return float(valor) == 0
+        except (ValueError, TypeError):
+            return False
+
+    resultado = row[5] if len(row) > 5 else ""
+    gasto = row[10] if len(row) > 10 else ""
+    return es_cero_o_vacio(gasto) and es_cero_o_vacio(resultado)
+
+
 # ----------------------------------------------------------------------
 # Google Sheets
 # ----------------------------------------------------------------------
@@ -556,6 +575,9 @@ def main():
                 "name": ins.get("adset_name", ""),
             })
             row = build_row(ads, ins, since, until, now_iso)
+            # Omitir filas sin actividad: gasto en 0/vacío Y resultado en 0/vacío
+            if is_empty_row(row):
+                continue
             new_rows.append(row)
 
     print(f"🆕 Filas nuevas construidas: {len(new_rows)}")
