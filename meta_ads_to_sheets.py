@@ -81,6 +81,8 @@ RESULT_LABELS = {
     "onsite_conversion.messaging_conversation_started_7d": "Conversaciones con mensajes iniciadas",
     "leadgen.other": "Clientes potenciales",
     "lead": "Clientes potenciales",
+    "onsite_conversion.lead_grouped": "Clientes potenciales",
+    "offsite_complete_registration_add_meta_leads": "Clientes potenciales",
     "link_click": "Clics en el enlace",
     "omni_landing_page_view": "Visualizaciones de la página de destino",
     "landing_page_view": "Visualizaciones de la página de destino",
@@ -93,9 +95,25 @@ RESULT_LABELS = {
 
 # Para cada OBJETIVO de Meta, cuál es el resultado principal (en orden de preferencia).
 # Esto replica cómo Meta decide qué mostrar en la columna "Resultados" al exportar.
+# Para casos donde el OBJETIVO no basta (ej: tráfico puede medir clics O vistas de
+# landing), la META DE OPTIMIZACIÓN (optimization_goal) desempata. Meta la entrega
+# por la API y define qué resultado muestra realmente.
+OPTIMIZATION_RESULT = {
+    "LEAD_GENERATION":    ["lead", "leadgen.other", "onsite_conversion.lead_grouped"],
+    "QUALITY_LEAD":       ["lead", "leadgen.other"],
+    "LINK_CLICKS":        ["link_click"],
+    "LANDING_PAGE_VIEWS": ["omni_landing_page_view", "landing_page_view"],
+    "CONVERSATIONS":      ["onsite_conversion.messaging_conversation_started_7d"],
+    "REPLIES":            ["onsite_conversion.messaging_conversation_started_7d"],
+    "REACH":              ["reach"],
+    "IMPRESSIONS":        ["reach"],
+    "POST_ENGAGEMENT":    ["post_engagement", "page_engagement"],
+    "OFFSITE_CONVERSIONS": ["omni_purchase", "purchase"],
+}
+
 OBJECTIVE_RESULT = {
     # Objetivos "Outcome" (nuevos)
-    "OUTCOME_LEADS":      ["onsite_conversion.messaging_conversation_started_7d", "leadgen.other", "lead"],
+    "OUTCOME_LEADS":      ["lead", "leadgen.other", "onsite_conversion.lead_grouped", "offsite_complete_registration_add_meta_leads"],
     "OUTCOME_ENGAGEMENT": ["onsite_conversion.messaging_conversation_started_7d", "post_engagement", "page_engagement"],
     "OUTCOME_TRAFFIC":    ["link_click", "omni_landing_page_view", "landing_page_view"],
     "OUTCOME_SALES":      ["onsite_conversion.messaging_conversation_started_7d", "omni_purchase", "purchase"],
@@ -103,7 +121,7 @@ OBJECTIVE_RESULT = {
     "OUTCOME_APP_PROMOTION": ["omni_app_install", "app_install"],
     # Objetivos antiguos (por compatibilidad)
     "MESSAGES":           ["onsite_conversion.messaging_conversation_started_7d"],
-    "LEAD_GENERATION":    ["leadgen.other", "lead"],
+    "LEAD_GENERATION":    ["lead", "leadgen.other", "onsite_conversion.lead_grouped"],
     "LINK_CLICKS":        ["link_click", "omni_landing_page_view"],
     "CONVERSIONS":        ["omni_purchase", "purchase", "onsite_conversion.messaging_conversation_started_7d"],
     "REACH":              ["reach"],
@@ -214,6 +232,7 @@ def fetch_insights_for_month(account_id, token, year, month):
         "impressions", "reach", "spend",
         "actions", "cost_per_action_type",
         "objective",
+        "optimization_goal",
         # 'results' trae el RESULTADO PRINCIPAL ya calculado por Meta según el
         # objetivo del anuncio (el mismo número que aparece en la exportación).
         "results",
@@ -288,28 +307,36 @@ def pick_result(insight):
 
     Devuelve (valor, action_type, etiqueta).
     """
-    # 1) Preferir el resultado ya calculado por Meta
+    # 1) Preferir el resultado ya calculado por Meta (si algún día lo devuelve)
     meta_val, meta_label = parse_meta_results(insight)
     if meta_val is not None:
         return meta_val, "_meta_results", meta_label
 
     actions = insight.get("actions", []) or []
     objective = (insight.get("objective") or "").upper()
+    optimization = (insight.get("optimization_goal") or "").upper()
 
-    # 2) Según el objetivo del anuncio
+    # 2) Según la META DE OPTIMIZACIÓN (la más precisa; desempata casos de tráfico)
+    opt_candidates = OPTIMIZATION_RESULT.get(optimization, [])
+    for action_type in opt_candidates:
+        v = get_action_value(actions, action_type)
+        if v is not None:
+            return v, action_type, RESULT_LABELS.get(action_type, action_type)
+
+    # 3) Según el objetivo del anuncio
     candidates = OBJECTIVE_RESULT.get(objective, [])
     for action_type in candidates:
         v = get_action_value(actions, action_type)
         if v is not None:
             return v, action_type, RESULT_LABELS.get(action_type, action_type)
 
-    # 3) Respaldo: recorrer prioridad general
+    # 4) Respaldo: recorrer prioridad general
     for action_type in FALLBACK_PRIORITY:
         v = get_action_value(actions, action_type)
         if v is not None:
             return v, action_type, RESULT_LABELS.get(action_type, action_type)
 
-    # 4) Último respaldo: alcance
+    # 5) Último respaldo: alcance
     reach = insight.get("reach")
     if reach:
         return float(reach), "reach", RESULT_LABELS["reach"]
