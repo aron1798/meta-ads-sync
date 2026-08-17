@@ -139,8 +139,12 @@ FALLBACK_PRIORITY = [
     "link_click",
     "omni_landing_page_view",
     "landing_page_view",
-    "post_engagement",
-    "page_engagement",
+    # NOTA: post_engagement y page_engagement NO van en el fallback.
+    # Meta no los cuenta como "resultado principal" salvo cuando el objetivo del
+    # anuncio es explícitamente de interacción (POST_ENGAGEMENT / OUTCOME_ENGAGEMENT).
+    # Dejarlos en el fallback hacía que anuncios sin resultado (que Meta muestra
+    # vacío) aparecieran con las interacciones. Para coincidir con el exportado de
+    # Meta, se excluyen de aquí.
 ]
 
 
@@ -322,6 +326,18 @@ def pick_result(insight):
         v = get_action_value(actions, action_type)
         if v is not None:
             return v, action_type, RESULT_LABELS.get(action_type, action_type)
+
+    # 2b) Optimizaciones DEFINITIVAS: si Meta optimizó para un resultado concreto
+    #     (respuestas, leads, clics, etc.) y ese resultado NO existe en las acciones,
+    #     Meta deja el resultado VACÍO — no muestra otra cosa. Para coincidir con el
+    #     exportado, aquí paramos y devolvemos vacío en vez de seguir buscando.
+    #     (Ej.: anuncio REPLIES sin ningún mensaje → vacío, no las interacciones.)
+    DEFINITIVE_OPTIMIZATIONS = {
+        "REPLIES", "CONVERSATIONS", "LEAD_GENERATION", "QUALITY_LEAD",
+        "LINK_CLICKS", "LANDING_PAGE_VIEWS", "OFFSITE_CONVERSIONS",
+    }
+    if optimization in DEFINITIVE_OPTIMIZATIONS:
+        return None, "", ""
 
     # 3) Según el objetivo del anuncio
     candidates = OBJECTIVE_RESULT.get(objective, [])
