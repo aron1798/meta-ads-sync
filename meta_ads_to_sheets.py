@@ -31,6 +31,7 @@ Autor: Generado para Aron - Refriperu
 import os
 import sys
 import json
+import time
 import calendar
 from datetime import datetime, timedelta, timezone, date
 
@@ -46,6 +47,11 @@ META_API_VERSION = "v19.0"
 META_BASE_URL = f"https://graph.facebook.com/{META_API_VERSION}"
 
 WORKSHEET_NAME = "Meta_Ads_Adsets"
+
+# Pausa (en segundos) entre la descarga de un mes y el siguiente. Le da un respiro
+# a la API de Meta para no toparse con el límite de "demasiadas llamadas seguidas".
+# Se puede ajustar con la variable de entorno PAUSE_BETWEEN_MONTHS (opcional).
+PAUSE_BETWEEN_MONTHS = float(os.environ.get("PAUSE_BETWEEN_MONTHS", "2"))
 
 # Las mismas columnas que aparecen en tu Excel exportado de Ads Manager
 # (se agregó "ID del conjunto de anuncios" al inicio para identificar cada adset de forma única)
@@ -578,7 +584,8 @@ def main():
     #    actividad, aunque ya no esté activo o tenga el mismo nombre que otro.
     months_to_fetch = months_to_backfill + active_months
     new_rows = []
-    for (y, m) in months_to_fetch:
+    total_meses = len(months_to_fetch)
+    for idx, (y, m) in enumerate(months_to_fetch):
         print(f"📥 Descargando insights de {y}-{m:02d}...")
         insights, since, until = fetch_insights_for_month(account_id, token, y, m)
         print(f"   → {len(insights)} insights")
@@ -595,6 +602,11 @@ def main():
             if is_empty_row(row):
                 continue
             new_rows.append(row)
+
+        # Pausa entre meses para no saturar la API de Meta (evita el error
+        # "Application request limit reached"). No espera después del último mes.
+        if PAUSE_BETWEEN_MONTHS > 0 and idx < total_meses - 1:
+            time.sleep(PAUSE_BETWEEN_MONTHS)
 
     print(f"🆕 Filas nuevas construidas: {len(new_rows)}")
 
