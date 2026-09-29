@@ -53,6 +53,21 @@ WORKSHEET_NAME = "Meta_Ads_Adsets"
 # Se puede ajustar con la variable de entorno PAUSE_BETWEEN_MONTHS (opcional).
 PAUSE_BETWEEN_MONTHS = float(os.environ.get("PAUSE_BETWEEN_MONTHS", "2"))
 
+# Reintentos automáticos cuando Meta falla por un error TEMPORAL (servidor caído,
+# límite de llamadas, servicio no disponible). No reintenta errores permanentes
+# como un token vencido (eso no se arregla reintentando).
+# - MAX_RETRIES: cuántas veces reintentar una misma llamada antes de rendirse.
+# - RETRY_BASE_WAIT: segundos de espera; crece en cada intento (5, 10, 20, 40...).
+MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "4"))
+RETRY_BASE_WAIT = float(os.environ.get("RETRY_BASE_WAIT", "5"))
+
+# Códigos/estados de Meta que SÍ vale la pena reintentar (son temporales).
+# 500/503 = servidor de Meta con problemas; 429 = demasiadas solicitudes.
+# code 1 (subcode 99) = "unknown error" temporal; code 2 = "service unavailable";
+# code 4 / 17 / 32 / 613 = límites de llamadas (rate limit).
+RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
+RETRYABLE_META_CODES = {1, 2, 4, 17, 32, 613}
+
 # Las mismas columnas que aparecen en tu Excel exportado de Ads Manager
 # (se agregó "ID del conjunto de anuncios" al inicio para identificar cada adset de forma única)
 COLUMNS = [
@@ -197,15 +212,68 @@ def list_months(start_ym, today):
 # ----------------------------------------------------------------------
 # Helpers Meta Graph API
 # ----------------------------------------------------------------------
+def _is_retryable(status_code, body_text):
+    """Decide si un error de Meta es TEMPORAL (vale la pena reintentar)."""
+    if status_code in RETRYABLE_HTTP_STATUS:
+        return True
+    # Revisar el código de error que Meta manda dentro del cuerpo JSON
+    try:
+        err = json.loads(body_text).get("error", {})
+        code = err.get("code")
+        is_transient = err.get("is_transient", False)
+        if is_transient:
+            return True
+        if code in RETRYABLE_META_CODES:
+            return True
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return False
+
+
 def meta_get(path, params):
-    """GET a Graph API con manejo de paginación."""
+    """
+    GET a Graph API con manejo de paginación Y reintento automático de errores
+    temporales. Si Meta falla por algo pasajero (servidor caído, límite de llamadas),
+    espera unos segundos y reintenta la MISMA petición, hasta MAX_RETRIES veces.
+    Los errores permanentes (token vencido, etc.) NO se reintentan: fallan de una vez.
+    """
     url = f"{META_BASE_URL}/{path}"
     items = []
     while url:
-        r = requests.get(url, params=params, timeout=60)
-        if r.status_code != 200:
-            print(f"ERROR Meta API ({r.status_code}): {r.text[:500]}", file=sys.stderr)
-            r.raise_for_status()
+        # --- Reintento de esta petición puntual (cubre también cada página) ---
+        attempt = 0
+        while True:
+            try:
+                r = requests.get(url, params=params, timeout=60)
+            except requests.exceptions.RequestException as e:
+                # Error de red (conexión cortada, timeout): también es temporal
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    print(f"ERROR de red tras {MAX_RETRIES} reintentos: {e}", file=sys.stderr)
+                    raise
+                wait = RETRY_BASE_WAIT * (2 ** (attempt - 1))
+                print(f"⚠️  Error de red. Reintento {attempt}/{MAX_RETRIES} en {wait:.0f}s...")
+                time.sleep(wait)
+                continue
+
+            if r.status_code == 200:
+                break  # todo bien, salir del bucle de reintento
+
+            # Hubo error: ¿es temporal?
+            if _is_retryable(r.status_code, r.text):
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    print(f"ERROR Meta API ({r.status_code}) tras {MAX_RETRIES} reintentos: {r.text[:300]}", file=sys.stderr)
+                    r.raise_for_status()
+                wait = RETRY_BASE_WAIT * (2 ** (attempt - 1))
+                print(f"⚠️  Meta respondió {r.status_code} (temporal). Reintento {attempt}/{MAX_RETRIES} en {wait:.0f}s...")
+                time.sleep(wait)
+                continue
+            else:
+                # Error permanente (ej: token vencido): no tiene caso reintentar
+                print(f"ERROR Meta API ({r.status_code}): {r.text[:500]}", file=sys.stderr)
+                r.raise_for_status()
+
         data = r.json()
         items.extend(data.get("data", []))
         paging = data.get("paging", {})
@@ -587,8 +655,31 @@ def main():
     total_meses = len(months_to_fetch)
     for idx, (y, m) in enumerate(months_to_fetch):
         print(f"📥 Descargando insights de {y}-{m:02d}...")
-        insights, since, until = fetch_insights_for_month(account_id, token, y, m)
-        print(f"   → {len(insights)} insights")
+
+        # Reintento a nivel de MES completo: si el mes falla pese a los reintentos
+        # internos de cada llamada, se vuelve a intentar el mes entero. Cuando sale
+        # bien, continúa con el siguiente mes (abril → si falla, reintenta abril →
+        # cuando sale, sigue mayo, y así). Solo reintenta errores TEMPORALES.
+        month_attempt = 0
+        while True:
+            try:
+                insights, since, until = fetch_insights_for_month(account_id, token, y, m)
+                print(f"   → {len(insights)} insights")
+                break
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                body = e.response.text if e.response is not None else ""
+                if _is_retryable(status, body):
+                    month_attempt += 1
+                    if month_attempt > MAX_RETRIES:
+                        print(f"   ❌ {y}-{m:02d} falló tras {MAX_RETRIES} reintentos del mes.", file=sys.stderr)
+                        raise
+                    wait = RETRY_BASE_WAIT * (2 ** (month_attempt - 1))
+                    print(f"   ⚠️  {y}-{m:02d} falló (temporal). Reintentando el mes {month_attempt}/{MAX_RETRIES} en {wait:.0f}s...")
+                    time.sleep(wait)
+                    continue
+                else:
+                    raise  # error permanente: no reintentar
 
         for ins in insights:
             adset_id = ins.get("adset_id")
